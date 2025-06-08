@@ -5,23 +5,24 @@ import requests
 import sqlite3
 from datetime import datetime, time
 import os
-from flask import Flask, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+import matplotlib.pyplot as plt
+import io
+import base64
 
-# Налаштування Flask
-app = Flask(__name__)
+# Налаштування планувальника
 scheduler = BackgroundScheduler()
 scheduler.start()
 
 # Налаштування OpenWeatherMap API
-API_KEY = os.getenv("OPENWEATHER_API_KEY", "your_openweather_api_key")  # Вставте ключ у Render
+API_KEY = os.getenv("OPENWEATHER_API_KEY", "your_openweather_api_key")
 WEATHER_URL = "http://api.openweathermap.org/data/2.5/weather"
 FORECAST_URL = "http://api.openweathermap.org/data/2.5/forecast"
 
 # Ініціалізація бази даних SQLite
 def init_db():
-    conn = sqlite3.connect("weather_bot.db")
+    conn = sqlite3.connect("/app/data/weather_bot.db")
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS requests
                  (user_id INTEGER, city TEXT, request_type TEXT, timestamp TEXT)''')
@@ -36,7 +37,7 @@ def init_db():
 
 # Збереження запиту
 def save_request(user_id, city, request_type):
-    conn = sqlite3.connect("weather_bot.db")
+    conn = sqlite3.connect("/app/data/weather_bot.db")
     c = conn.cursor()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute("INSERT INTO requests (user_id, city, request_type, timestamp) VALUES (?, ?, ?, ?)",
@@ -46,7 +47,7 @@ def save_request(user_id, city, request_type):
 
 # Збереження улюбленого міста
 def save_favorite_city(user_id, city):
-    conn = sqlite3.connect("weather_bot.db")
+    conn = sqlite3.connect("/app/data/weather_bot.db")
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO favorite_cities (user_id, city) VALUES (?, ?)", (user_id, city))
     conn.commit()
@@ -54,7 +55,7 @@ def save_favorite_city(user_id, city):
 
 # Отримання улюблених міст
 def get_favorite_cities(user_id):
-    conn = sqlite3.connect("weather_bot.db")
+    conn = sqlite3.connect("/app/data/weather_bot.db")
     c = conn.cursor()
     c.execute("SELECT city FROM favorite_cities WHERE user_id = ?", (user_id,))
     cities = [row[0] for row in c.fetchall()]
@@ -63,7 +64,7 @@ def get_favorite_cities(user_id):
 
 # Збереження часу оповіщень
 def save_notification_time(user_id, notify_time):
-    conn = sqlite3.connect("weather_bot.db")
+    conn = sqlite3.connect("/app/data/weather_bot.db")
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO notifications (user_id, notify_time) VALUES (?, ?)",
               (user_id, notify_time))
@@ -72,7 +73,7 @@ def save_notification_time(user_id, notify_time):
 
 # Отримання часу оповіщень
 def get_notification_times(user_id):
-    conn = sqlite3.connect("weather_bot.db")
+    conn = sqlite3.connect("/app/data/weather_bot.db")
     c = conn.cursor()
     c.execute("SELECT notify_time FROM notifications WHERE user_id = ?", (user_id,))
     times = [row[0] for row in c.fetchall()]
@@ -81,7 +82,7 @@ def get_notification_times(user_id):
 
 # Видалення оповіщень
 def delete_notifications(user_id):
-    conn = sqlite3.connect("weather_bot.db")
+    conn = sqlite3.connect("/app/data/weather_bot.db")
     c = conn.cursor()
     c.execute("DELETE FROM notifications WHERE user_id = ?", (user_id,))
     conn.commit()
@@ -89,7 +90,7 @@ def delete_notifications(user_id):
 
 # Збереження налаштувань сповіщень про екстремальну погоду
 def save_alert_setting(user_id, enabled):
-    conn = sqlite3.connect("weather_bot.db")
+    conn = sqlite3.connect("/app/data/weather_bot.db")
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO alerts (user_id, enabled) VALUES (?, ?)", (user_id, enabled))
     conn.commit()
@@ -97,7 +98,7 @@ def save_alert_setting(user_id, enabled):
 
 # Отримання історії запитів
 def get_history(user_id, limit=5):
-    conn = sqlite3.connect("weather_bot.db")
+    conn = sqlite3.connect("/app/data/weather_bot.db")
     c = conn.cursor()
     c.execute("SELECT city, request_type, timestamp FROM requests WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
               (user_id, limit))
@@ -107,9 +108,10 @@ def get_history(user_id, limit=5):
 
 # Отримання поточної погоди
 def get_current_weather(city):
-    params = {"q": city, "appid": API_KEY, "units": "metric", "lang": "uk"}
-    response = requests.get(WEATHER_URL, params=params)
-    if response.status_code == 200:
+    try:
+        params = {"q": city, "appid": API_KEY, "units": "metric", "lang": "uk"}
+        response = requests.get(WEATHER_URL, params=params)
+        response.raise_for_status()
         data = response.json()
         temp = data["main"]["temp"]
         temp_min = data["main"]["temp_min"]
@@ -120,10 +122,6 @@ def get_current_weather(city):
         weather_emoji = get_weather_emoji(description)
         advice = get_weather_advice(description, temp, wind, humidity)
         tip = get_daily_tip(description, temp, wind)
-        # UV-індекс закоментовано, бо може потребувати платного API
-        # lat, lon = get_city_coordinates(city)
-        # uv_index = get_uv_index(lat, lon)
-        # uv_advice = get_uv_advice(uv_index)
         uv_index = 0
         uv_advice = "Недоступно"
         return (f"📍 Погода в {city} 🌟:\n"
@@ -133,19 +131,21 @@ def get_current_weather(city):
                 f"💨 • Вітер: {wind} м/с {get_wind_emoji(wind)}\n"
                 f"☀️ • UV-індекс: {uv_index:.1f} ({uv_advice})\n\n"
                 f"{advice}\n{tip}")
-    return f"Не вдалося знайти погоду для {city}."
+    except requests.RequestException:
+        return f"Не вдалося знайти погоду для {city}."
 
 # Отримання прогнозу на 5 днів
 def get_forecast(city):
-    params = {"q": city, "appid": API_KEY, "units": "metric", "lang": "uk"}
-    response = requests.get(FORECAST_URL, params=params)
-    if response.status_code == 200:
+    try:
+        params = {"q": city, "appid": API_KEY, "units": "metric", "lang": "uk"}
+        response = requests.get(FORECAST_URL, params=params)
+        response.raise_for_status()
         data = response.json()
         forecast = []
         temps = []
         dates = []
         rainy_days = 0
-        for item in data["list"][::8]:  # Раз на день
+        for item in data["list"][::8]:
             date = item["dt_txt"].split()[0]
             temp = item["main"]["temp"]
             temp_min = item["main"]["temp_min"]
@@ -175,7 +175,8 @@ def get_forecast(city):
             conclusion += "Теплий і приємний тиждень! 🌞 Ідеально для прогулянок 🚶‍♀️ і активного відпочинку 🚴‍♀️."
         chart = get_temperature_chart(dates, temps, city)
         return (f"📅 Прогноз погоди на 5 днів у {city} 🌟:\n\n" + "\n".join(forecast) + f"\n{conclusion}", chart)
-    return (f"Не вдалося знайти прогноз для {city}.", None)
+    except requests.RequestException:
+        return (f"Не вдалося знайти прогноз для {city}.", None)
 
 # Емодзі для погоди
 def get_weather_emoji(description):
@@ -228,26 +229,22 @@ def get_daily_tip(description, temp, wind):
 
 # Графік температури
 def get_temperature_chart(dates, temps, city):
-    return {
-        "type": "line",
-        "data": {
-            "labels": dates,
-            "datasets": [{
-                "label": f"Температура в {city} (°C)",
-                "data": temps,
-                "borderColor": "#3498db",
-                "backgroundColor": "rgba(52, 152, 219, 0.2)",
-                "fill": True
-            }]
-        },
-        "options": {
-            "responsive": true,
-            "scales": {
-                "y": {"title": {"display": True, "text": "Температура (°C)"}},
-                "x": {"title": {"display": True, "text": "Дата"}}
-            }
-        }
-    }
+    plt.figure(figsize=(8, 4))
+    plt.plot(dates, temps, marker='o', color='#3498db', label=f'Температура в {city} (°C)')
+    plt.fill_between(dates, temps, color='rgba(52, 152, 219, 0.2)')
+    plt.title(f'Прогноз температури в {city}')
+    plt.xlabel('Дата')
+    plt.ylabel('Температура (°C)')
+    plt.legend()
+    plt.grid(True)
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    
+    img_base64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+    return img_base64
 
 # Налаштування оповіщень
 async def send_notification(context: ContextTypes.DEFAULT_TYPE, user_id, bot):
@@ -261,7 +258,7 @@ async def send_notification(context: ContextTypes.DEFAULT_TYPE, user_id, bot):
 
 # Перевірка екстремальної погоди
 async def check_extreme_weather(context: ContextTypes.DEFAULT_TYPE, user_id, bot):
-    conn = sqlite3.connect("weather_bot.db")
+    conn = sqlite3.connect("/app/data/weather_bot.db")
     c = conn.cursor()
     c.execute("SELECT enabled FROM alerts WHERE user_id = ?", (user_id,))
     enabled = c.fetchone()
@@ -270,13 +267,16 @@ async def check_extreme_weather(context: ContextTypes.DEFAULT_TYPE, user_id, bot
     cities = get_favorite_cities(user_id)
     for city in cities:
         params = {"q": city, "appid": API_KEY, "units": "metric", "lang": "uk"}
-        response = requests.get(WEATHER_URL, params=params)
-        if response.status_code == 200:
+        try:
+            response = requests.get(WEATHER_URL, params=params)
+            response.raise_for_status()
             data = response.json()
             temp = data["main"]["temp"]
             description = data["weather"][0]["description"].lower()
             if temp > 30 or temp < -10 or "сильний дощ" in description or "шторм" in description:
                 await bot.send_message(user_id, f"⚠️ Увага! Екстремальна погода в {city}: {temp}°C, {description}.")
+        except requests.RequestException:
+            pass
 
 # Клавіатура для вибору типу прогнозу
 def get_weather_keyboard():
@@ -319,6 +319,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # Обробка текстових повідомлень
+# Обробка текстових повідомлень
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text.strip()
@@ -343,7 +344,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     context.user_data["cities"] = cities
-    await update.message.reply_text("Виберіть тип прогнозу:", reply_markup=get_weather_keyboard())
+    await update.message.reply_text("Виберіть тип прогнозу:", reply_markup=get_weather_keyboard())  # Виправлено
 
 # Обробка кнопок
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -389,8 +390,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_request(user_id, city, "forecast")
             await query.message.reply_text(result)
             if chart:
-                await query.message.reply_text("📈 Графік температури:")
-                await query.message.reply_text(f"```chartjs\n{chart}\n```")
+                await query.message.reply_photo(photo=io.BytesIO(base64.b64decode(chart)))
     
     await query.message.edit_text("Введіть нові міста або скористайтеся іншими командами.")
     del context.user_data["cities"]
@@ -452,14 +452,17 @@ async def alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_alert_setting(user_id, 1)
         scheduler.add_job(
             check_extreme_weather,
-            CronTrigger(hour="*/3"),  # Кожні 3 години
+            CronTrigger(hour="*/6"),
             args=[context, user_id, context.bot],
             id=f"alert_{user_id}"
         )
         await update.message.reply_text("Сповіщення про екстремальну погоду увімкнено.")
     elif context.args and context.args[0].lower() == "off":
         save_alert_setting(user_id, 0)
-        scheduler.remove_job(f"alert_{user_id}")
+        try:
+            scheduler.remove_job(f"alert_{user_id}")
+        except:
+            pass
         await update.message.reply_text("Сповіщення про екстремальну погоду вимкнено.")
     else:
         await update.message.reply_text("Використовуйте: /alert on або /alert off")
@@ -477,34 +480,53 @@ async def compare(update: Update, context: ContextTypes.DEFAULT_TYPE):
     weather2 = get_current_weather(cities[1])
     comparison = f"Порівняння погоди:\n\n{weather1}\n\n{weather2}\n\n"
     
-    params1 = {"q": cities[0], "appid": API_KEY, "units": "metric"}
-    params2 = {"q": cities[1], "appid": API_KEY, "units": "metric"}
-    temp1 = requests.get(WEATHER_URL, params=params1).json().get("main", {}).get("temp", 0)
-    temp2 = requests.get(WEATHER_URL, params=params2).json().get("main", {}).get("temp", 0)
-    
-    if temp1 > temp2:
-        comparison += f"У {cities[0]} тепліше! 🌞"
-    elif temp2 > temp1:
-        comparison += f"У {cities[1]} тепліше! 🌞"
-    else:
-        comparison += "Температура однакова! 😊"
+    try:
+        params1 = {"q": cities[0], "appid": API_KEY, "units": "metric"}
+        params2 = {"q": cities[1], "appid": API_KEY, "units": "metric"}
+        temp1 = requests.get(WEATHER_URL, params=params1).json().get("main", {}).get("temp", 0)
+        temp2 = requests.get(WEATHER_URL, params=params2).json().get("main", {}).get("temp", 0)
+        
+        if temp1 > temp2:
+            comparison += f"У {cities[0]} тепліше! 🌞"
+        elif temp2 > temp1:
+            comparison += f"У {cities[1]} тепліше! 🌞"
+        else:
+            comparison += "Температура однакова! 😊"
+    except:
+        comparison += "Не вдалося порівняти температури."
     
     save_request(user_id, cities[0], "compare")
     save_request(user_id, cities[1], "compare")
     await update.message.reply_text(comparison)
 
-# Flask вебхук
-@app.route("/webhook", methods=["POST"])
-async def webhook():
-    update = telegram.Update.de_json(request.get_json(force=True), application.bot)
-    await application.process_update(update)
-    return "OK"
+# Завантаження запланованих завдань
+def load_scheduled_jobs(application):
+    conn = sqlite3.connect("/app/data/weather_bot.db")
+    c = conn.cursor()
+    c.execute("SELECT user_id, notify_time FROM notifications")
+    for user_id, notify_time in c.fetchall():
+        hour, minute = map(int, notify_time.split(":"))
+        scheduler.add_job(
+            send_notification,
+            CronTrigger(hour=hour, minute=minute),
+            args=[None, user_id, application.bot],
+            id=f"notify_{user_id}_{notify_time}"
+        )
+    c.execute("SELECT user_id FROM alerts WHERE enabled = 1")
+    for (user_id,) in c.fetchall():
+        scheduler.add_job(
+            check_extreme_weather,
+            CronTrigger(hour="*/6"),
+            args=[None, user_id, application.bot],
+            id=f"alert_{user_id}"
+        )
+    conn.close()
 
 # Головна функція
 def main():
     global application
     init_db()
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "your_telegram_bot_token")  # Вставте токен у Render
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "your_telegram_bot_token")
     application = Application.builder().token(bot_token).build()
 
     application.add_handler(CommandHandler("start", start))
@@ -516,8 +538,15 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_button))
 
-    port = int(os.getenv("PORT", 8443))
-    app.run(host="0.0.0.0", port=port)
+    load_scheduled_jobs(application)
+
+    webhook_url = os.getenv("WEBHOOK_URL", "https://your-render-service.onrender.com/webhook")
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.getenv("PORT", 8443)),
+        url_path="/webhook",
+        webhook_url=webhook_url
+    )
 
 if __name__ == "__main__":
     main()
